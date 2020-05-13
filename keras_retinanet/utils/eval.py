@@ -14,29 +14,29 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from .anchors import compute_overlap
-from .visualization import draw_detections, draw_annotations
+from utils.compute_overlap import compute_overlap
+from utils.visualization import draw_detections, draw_annotations
 
-import keras
 import numpy as np
-import os
-import time
-
 import cv2
 import progressbar
-assert(callable(progressbar.progressbar)), "Using wrong progressbar module, install 'progressbar2' instead."
+
+assert (callable(progressbar.progressbar)), "Using wrong progressbar module, install 'progressbar2' instead."
 
 
 def _compute_ap(recall, precision):
-    """ Compute the average precision, given the recall and precision curves.
+    """
+    Compute the average precision, given the recall and precision curves.
 
     Code originally from https://github.com/rbgirshick/py-faster-rcnn.
 
-    # Arguments
-        recall:    The recall curve (list).
+    Args:
+        recall: The recall curve (list).
         precision: The precision curve (list).
-    # Returns
+
+    Returns:
         The average precision as computed in py-faster-rcnn.
+
     """
     # correct AP calculation
     # first append sentinel values at the end
@@ -51,44 +51,50 @@ def _compute_ap(recall, precision):
     # where X axis (recall) changes value
     i = np.where(mrec[1:] != mrec[:-1])[0]
 
-    # and sum (\Delta recall) * prec
+    # and sum (delta recall) * prec
     ap = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])
     return ap
 
 
-def _get_detections(generator, model, score_threshold=0.05, max_detections=100, save_path=None):
-    """ Get the detections from the model using the generator.
+def _get_detections(generator, model, score_threshold=0.05, max_detections=100, visualize=False):
+    """
+    Get the detections from the model using the generator.
 
     The result is a list of lists such that the size is:
-        all_detections[num_images][num_classes] = detections[num_detections, 4 + num_classes]
+        all_detections[num_images][num_classes] = detections[num_class_detections, 5]
 
-    # Arguments
-        generator       : The generator used to run images through the model.
-        model           : The model to run on the images.
-        score_threshold : The score confidence threshold to use.
-        max_detections  : The maximum number of detections to use per image.
-        save_path       : The path to save the images with visualized detections to.
-    # Returns
+    Args:
+        generator: The generator used to run images through the model.
+        model: The model to run on the images.
+        score_threshold: The score confidence threshold to use.
+        max_detections: The maximum number of detections to use per image.
+        save_path: The path to save the images with visualized detections to.
+
+    Returns:
         A list of lists containing the detections for each image in the generator.
+
     """
-    all_detections = [[None for i in range(generator.num_classes()) if generator.has_label(i)] for j in range(generator.size())]
-    all_inferences = [None for i in range(generator.size())]
+    all_detections = [[None for i in range(generator.num_classes()) if generator.has_label(i)] for j in
+                      range(generator.size())]
 
     for i in progressbar.progressbar(range(generator.size()), prefix='Running network: '):
-        raw_image    = generator.load_image(i)
-        image        = generator.preprocess_image(raw_image.copy())
-        image, scale = generator.resize_image(image)
+        image = generator.load_image(i)
+        src_image = image.copy()
+        h, w = image.shape[:2]
 
-        if keras.backend.image_data_format() == 'channels_first':
-            image = image.transpose((2, 0, 1))
+        anchors = generator.anchors
+        image, scale, offset_h, offset_w = generator.preprocess_image(image)
 
         # run network
-        start = time.time()
-        boxes, scores, labels = model.predict_on_batch(np.expand_dims(image, axis=0))[:3]
-        inference_time = time.time() - start
-
-        # correct boxes for image scale
+        boxes, scores, labels = model.predict_on_batch([np.expand_dims(image, axis=0),
+                                                        np.expand_dims(anchors, axis=0)])
+        boxes[..., [0, 2]] = boxes[..., [0, 2]] - offset_w
+        boxes[..., [1, 3]] = boxes[..., [1, 3]] - offset_h
         boxes /= scale
+        boxes[:, :, 0] = np.clip(boxes[:, :, 0], 0, w - 1)
+        boxes[:, :, 1] = np.clip(boxes[:, :, 1], 0, h - 1)
+        boxes[:, :, 2] = np.clip(boxes[:, :, 2], 0, w - 1)
+        boxes[:, :, 3] = np.clip(boxes[:, :, 3], 0, h - 1)
 
         # select indices which have a score above the threshold
         indices = np.where(scores[0, :] > score_threshold)[0]
@@ -100,39 +106,47 @@ def _get_detections(generator, model, score_threshold=0.05, max_detections=100, 
         scores_sort = np.argsort(-scores)[:max_detections]
 
         # select detections
-        image_boxes      = boxes[0, indices[scores_sort], :]
-        image_scores     = scores[scores_sort]
-        image_labels     = labels[0, indices[scores_sort]]
-        image_detections = np.concatenate([image_boxes, np.expand_dims(image_scores, axis=1), np.expand_dims(image_labels, axis=1)], axis=1)
+        # (n, 4)
+        image_boxes = boxes[0, indices[scores_sort], :]
+        # (n, )
+        image_scores = scores[scores_sort]
+        # (n, )
+        image_labels = labels[0, indices[scores_sort]]
+        # (n, 6)
+        detections = np.concatenate(
+            [image_boxes, np.expand_dims(image_scores, axis=1), np.expand_dims(image_labels, axis=1)], axis=1)
 
-        if save_path is not None:
-            draw_annotations(raw_image, generator.load_annotations(i), label_to_name=generator.label_to_name)
-            draw_detections(raw_image, image_boxes, image_scores, image_labels, label_to_name=generator.label_to_name, score_threshold=score_threshold)
+        if visualize:
+            draw_annotations(src_image, generator.load_annotations(i), label_to_name=generator.label_to_name)
+            draw_detections(src_image, detections[:5, :4], detections[:5, 4], detections[:5, 5].astype(np.int32),
+                            label_to_name=generator.label_to_name,
+                            score_threshold=score_threshold)
 
-            cv2.imwrite(os.path.join(save_path, '{}.png'.format(i)), raw_image)
+            # cv2.imwrite(os.path.join(save_path, '{}.png'.format(i)), raw_image)
+            cv2.namedWindow('{}'.format(i), cv2.WINDOW_NORMAL)
+            cv2.imshow('{}'.format(i), src_image)
+            cv2.waitKey(0)
 
         # copy detections to all_detections
-        for label in range(generator.num_classes()):
-            if not generator.has_label(label):
-                continue
+        for class_id in range(generator.num_classes()):
+            all_detections[i][class_id] = detections[detections[:, -1] == class_id, :-1]
 
-            all_detections[i][label] = image_detections[image_detections[:, -1] == label, :-1]
-
-        all_inferences[i] = inference_time
-
-    return all_detections, all_inferences
+    return all_detections
 
 
 def _get_annotations(generator):
-    """ Get the ground truth annotations from the generator.
+    """
+    Get the ground truth annotations from the generator.
 
     The result is a list of lists such that the size is:
-        all_detections[num_images][num_classes] = annotations[num_detections, 5]
+        all_annotations[num_images][num_classes] = annotations[num_class_annotations, 5]
 
-    # Arguments
-        generator : The generator used to retrieve ground truth annotations.
-    # Returns
+    Args:
+        generator: The generator used to retrieve ground truth annotations.
+
+    Returns:
         A list of lists containing the annotations for each image in the generator.
+
     """
     all_annotations = [[None for i in range(generator.num_classes())] for j in range(generator.size())]
 
@@ -151,34 +165,36 @@ def _get_annotations(generator):
 
 
 def evaluate(
-    generator,
-    model,
-    iou_threshold=0.5,
-    score_threshold=0.05,
-    max_detections=100,
-    save_path=None
+        generator,
+        model,
+        iou_threshold=0.5,
+        score_threshold=0.01,
+        max_detections=100,
+        visualize=False,
+        epoch=0
 ):
-    """ Evaluate a given dataset using a given model.
+    """
+    Evaluate a given dataset using a given model.
 
-    # Arguments
-        generator       : The generator that represents the dataset to evaluate.
-        model           : The model to evaluate.
-        iou_threshold   : The threshold used to consider when a detection is positive or negative.
-        score_threshold : The score confidence threshold to use for detections.
-        max_detections  : The maximum number of detections to use per image.
-        save_path       : The path to save images with visualized detections to.
-    # Returns
+    Args:
+        generator: The generator that represents the dataset to evaluate.
+        model: The model to evaluate.
+        iou_threshold: The threshold used to consider when a detection is positive or negative.
+        score_threshold: The score confidence threshold to use for detections.
+        max_detections: The maximum number of detections to use per image.
+        visualize: Show the visualized detections or not.
+
+    Returns:
         A dict mapping class names to mAP scores.
+
     """
     # gather all detections and annotations
-    all_detections, all_inferences = _get_detections(generator, model, score_threshold=score_threshold, max_detections=max_detections, save_path=save_path)
-    all_annotations    = _get_annotations(generator)
+    all_detections = _get_detections(generator, model, score_threshold=score_threshold, max_detections=max_detections,
+                                     visualize=visualize)
+    all_annotations = _get_annotations(generator)
     average_precisions = {}
-
-    # all_detections = pickle.load(open('all_detections.pkl', 'rb'))
-    # all_annotations = pickle.load(open('all_annotations.pkl', 'rb'))
-    # pickle.dump(all_detections, open('all_detections.pkl', 'wb'))
-    # pickle.dump(all_annotations, open('all_annotations.pkl', 'wb'))
+    num_tp = 0
+    num_fp = 0
 
     # process detections and annotations
     for label in range(generator.num_classes()):
@@ -186,14 +202,14 @@ def evaluate(
             continue
 
         false_positives = np.zeros((0,))
-        true_positives  = np.zeros((0,))
-        scores          = np.zeros((0,))
+        true_positives = np.zeros((0,))
+        scores = np.zeros((0,))
         num_annotations = 0.0
 
         for i in range(generator.size()):
-            detections           = all_detections[i][label]
-            annotations          = all_annotations[i][label]
-            num_annotations     += annotations.shape[0]
+            detections = all_detections[i][label]
+            annotations = all_annotations[i][label]
+            num_annotations += annotations.shape[0]
             detected_annotations = []
 
             for d in detections:
@@ -201,20 +217,19 @@ def evaluate(
 
                 if annotations.shape[0] == 0:
                     false_positives = np.append(false_positives, 1)
-                    true_positives  = np.append(true_positives, 0)
+                    true_positives = np.append(true_positives, 0)
                     continue
-
-                overlaps            = compute_overlap(np.expand_dims(d, axis=0), annotations)
+                overlaps = compute_overlap(np.expand_dims(d, axis=0), annotations)
                 assigned_annotation = np.argmax(overlaps, axis=1)
-                max_overlap         = overlaps[0, assigned_annotation]
+                max_overlap = overlaps[0, assigned_annotation]
 
                 if max_overlap >= iou_threshold and assigned_annotation not in detected_annotations:
                     false_positives = np.append(false_positives, 0)
-                    true_positives  = np.append(true_positives, 1)
+                    true_positives = np.append(true_positives, 1)
                     detected_annotations.append(assigned_annotation)
                 else:
                     false_positives = np.append(false_positives, 1)
-                    true_positives  = np.append(true_positives, 0)
+                    true_positives = np.append(true_positives, 0)
 
         # no annotations -> AP for this class is 0 (is this correct?)
         if num_annotations == 0:
@@ -222,26 +237,72 @@ def evaluate(
             continue
 
         # sort by score
-        indices         = np.argsort(-scores)
+        indices = np.argsort(-scores)
         false_positives = false_positives[indices]
-        true_positives  = true_positives[indices]
+        true_positives = true_positives[indices]
 
         # compute false positives and true positives
         false_positives = np.cumsum(false_positives)
-        true_positives  = np.cumsum(true_positives)
+        true_positives = np.cumsum(true_positives)
+
+        if false_positives.shape[0] == 0:
+            num_fp += 0
+        else:
+            num_fp += false_positives[-1]
+        if true_positives.shape[0] == 0:
+            num_tp += 0
+        else:
+            num_tp += true_positives[-1]
 
         # compute recall and precision
-        recall    = true_positives / num_annotations
+        recall = true_positives / num_annotations
         precision = true_positives / np.maximum(true_positives + false_positives, np.finfo(np.float64).eps)
-        print("TP: " + str(true_positives))
-        print("FP: " + str(false_positives))
-        print("Total annotations: " + str(num_annotations))
+        print("Precision: " + str(precision))
+        print("Recall: " + str(recall))
 
         # compute average precision
-        average_precision  = _compute_ap(recall, precision)
+        average_precision = _compute_ap(recall, precision)
         average_precisions[label] = average_precision, num_annotations
+    print('num_fp={}, num_tp={}'.format(num_fp, num_tp))
 
-    # inference time
-    inference_time = np.sum(all_inferences) / generator.size()
+    return average_precisions
 
-    return average_precisions, inference_time
+
+if __name__ == '__main__':
+    from generators.pascal import PascalVocGenerator
+    from model import efficientdet
+    import os
+
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+
+    phi = 1
+    weighted_bifpn = False
+    common_args = {
+        'batch_size': 1,
+        'phi': phi,
+    }
+    test_generator = PascalVocGenerator(
+        'datasets/VOC2007',
+        'test',
+        shuffle_groups=False,
+        skip_truncated=False,
+        skip_difficult=True,
+        **common_args
+    )
+    model_path = 'checkpoints/2019-12-03/pascal_05_0.6283_1.1975_0.8029.h5'
+    input_shape = (test_generator.image_size, test_generator.image_size)
+    anchors = test_generator.anchors
+    num_classes = test_generator.num_classes()
+    model, prediction_model = efficientdet(phi=phi, num_classes=num_classes, weighted_bifpn=weighted_bifpn)
+    prediction_model.load_weights(model_path, by_name=True)
+    average_precisions = evaluate(test_generator, prediction_model, visualize=False)
+    # compute per class average precision
+    total_instances = []
+    precisions = []
+    for label, (average_precision, num_annotations) in average_precisions.items():
+        print('{:.0f} instances of class'.format(num_annotations), test_generator.label_to_name(label),
+              'with average precision: {:.4f}'.format(average_precision))
+        total_instances.append(num_annotations)
+        precisions.append(average_precision)
+    mean_ap = sum(precisions) / sum(x > 0 for x in total_instances)
+    print('mAP: {:.4f}'.format(mean_ap))

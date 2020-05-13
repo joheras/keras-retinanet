@@ -1,9 +1,12 @@
 """
 Copyright 2017-2018 Fizyr (https://fizyr.com)
+
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
+
     http://www.apache.org/licenses/LICENSE-2.0
+
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -26,7 +29,9 @@ assert(callable(progressbar.progressbar)), "Using wrong progressbar module, inst
 
 def _compute_ap(recall, precision):
     """ Compute the average precision, given the recall and precision curves.
+
     Code originally from https://github.com/rbgirshick/py-faster-rcnn.
+
     # Arguments
         recall:    The recall curve (list).
         precision: The precision curve (list).
@@ -53,8 +58,10 @@ def _compute_ap(recall, precision):
 
 def _get_detections(generator, model, score_threshold=0.05, max_detections=100, save_path=None):
     """ Get the detections from the model using the generator.
+
     The result is a list of lists such that the size is:
         all_detections[num_images][num_classes] = detections[num_detections, 4 + num_classes]
+
     # Arguments
         generator       : The generator used to run images through the model.
         model           : The model to run on the images.
@@ -118,8 +125,10 @@ def _get_detections(generator, model, score_threshold=0.05, max_detections=100, 
 
 def _get_annotations(generator):
     """ Get the ground truth annotations from the generator.
+
     The result is a list of lists such that the size is:
         all_detections[num_images][num_classes] = annotations[num_detections, 5]
+
     # Arguments
         generator : The generator used to retrieve ground truth annotations.
     # Returns
@@ -142,33 +151,36 @@ def _get_annotations(generator):
 
 
 def evaluate(
-        generator,
-        model,
-        iou_threshold=0.5,
-        score_threshold=0.01,
-        max_detections=100,
-        visualize=False,
-        epoch=0
+    generator,
+    model,
+    iou_threshold=0.5,
+    score_threshold=0.05,
+    max_detections=100,
+    save_path=None
 ):
-    """
-    Evaluate a given dataset using a given model.
-    Args:
-        generator: The generator that represents the dataset to evaluate.
-        model: The model to evaluate.
-        iou_threshold: The threshold used to consider when a detection is positive or negative.
-        score_threshold: The score confidence threshold to use for detections.
-        max_detections: The maximum number of detections to use per image.
-        visualize: Show the visualized detections or not.
-    Returns:
+    """ Evaluate a given dataset using a given model.
+
+    # Arguments
+        generator       : The generator that represents the dataset to evaluate.
+        model           : The model to evaluate.
+        iou_threshold   : The threshold used to consider when a detection is positive or negative.
+        score_threshold : The score confidence threshold to use for detections.
+        max_detections  : The maximum number of detections to use per image.
+        save_path       : The path to save images with visualized detections to.
+    # Returns
         A dict mapping class names to mAP scores.
     """
     # gather all detections and annotations
-    all_detections = _get_detections(generator, model, score_threshold=score_threshold, max_detections=max_detections,
-                                     visualize=visualize)
-    all_annotations = _get_annotations(generator)
+    all_detections, all_inferences = _get_detections(generator, model, score_threshold=score_threshold, max_detections=max_detections, save_path=save_path)
+    all_annotations    = _get_annotations(generator)
     average_precisions = {}
     num_tp = 0
     num_fp = 0
+
+    # all_detections = pickle.load(open('all_detections.pkl', 'rb'))
+    # all_annotations = pickle.load(open('all_annotations.pkl', 'rb'))
+    # pickle.dump(all_detections, open('all_detections.pkl', 'wb'))
+    # pickle.dump(all_annotations, open('all_annotations.pkl', 'wb'))
 
     # process detections and annotations
     for label in range(generator.num_classes()):
@@ -176,14 +188,14 @@ def evaluate(
             continue
 
         false_positives = np.zeros((0,))
-        true_positives = np.zeros((0,))
-        scores = np.zeros((0,))
+        true_positives  = np.zeros((0,))
+        scores          = np.zeros((0,))
         num_annotations = 0.0
 
         for i in range(generator.size()):
-            detections = all_detections[i][label]
-            annotations = all_annotations[i][label]
-            num_annotations += annotations.shape[0]
+            detections           = all_detections[i][label]
+            annotations          = all_annotations[i][label]
+            num_annotations     += annotations.shape[0]
             detected_annotations = []
 
             for d in detections:
@@ -191,19 +203,20 @@ def evaluate(
 
                 if annotations.shape[0] == 0:
                     false_positives = np.append(false_positives, 1)
-                    true_positives = np.append(true_positives, 0)
+                    true_positives  = np.append(true_positives, 0)
                     continue
-                overlaps = compute_overlap(np.expand_dims(d, axis=0), annotations)
+
+                overlaps            = compute_overlap(np.expand_dims(d, axis=0), annotations)
                 assigned_annotation = np.argmax(overlaps, axis=1)
-                max_overlap = overlaps[0, assigned_annotation]
+                max_overlap         = overlaps[0, assigned_annotation]
 
                 if max_overlap >= iou_threshold and assigned_annotation not in detected_annotations:
                     false_positives = np.append(false_positives, 0)
-                    true_positives = np.append(true_positives, 1)
+                    true_positives  = np.append(true_positives, 1)
                     detected_annotations.append(assigned_annotation)
                 else:
                     false_positives = np.append(false_positives, 1)
-                    true_positives = np.append(true_positives, 0)
+                    true_positives  = np.append(true_positives, 0)
 
         # no annotations -> AP for this class is 0 (is this correct?)
         if num_annotations == 0:
@@ -211,13 +224,13 @@ def evaluate(
             continue
 
         # sort by score
-        indices = np.argsort(-scores)
+        indices         = np.argsort(-scores)
         false_positives = false_positives[indices]
-        true_positives = true_positives[indices]
+        true_positives  = true_positives[indices]
 
         # compute false positives and true positives
         false_positives = np.cumsum(false_positives)
-        true_positives = np.cumsum(true_positives)
+        true_positives  = np.cumsum(true_positives)
 
         if false_positives.shape[0] == 0:
             num_fp += 0
@@ -228,16 +241,17 @@ def evaluate(
         else:
             num_tp += true_positives[-1]
 
+
         # compute recall and precision
-        recall = true_positives / num_annotations
+        recall    = true_positives / num_annotations
         precision = true_positives / np.maximum(true_positives + false_positives, np.finfo(np.float64).eps)
-        print("Precision: " + str(precision))
-        print("Recall: " + str(recall))
 
         # compute average precision
-        average_precision = _compute_ap(recall, precision)
+        average_precision  = _compute_ap(recall, precision)
         average_precisions[label] = average_precision, num_annotations
-    
+
+    # inference time
+    inference_time = np.sum(all_inferences) / generator.size()
     print('num_fp={}, num_tp={}, num_annotations={}'.format(num_fp, num_tp,num_annotations))
 
-    return average_precisions
+    return average_precisions, inference_time

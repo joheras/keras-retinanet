@@ -1,12 +1,9 @@
 """
 Copyright 2017-2018 Fizyr (https://fizyr.com)
-
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-
     http://www.apache.org/licenses/LICENSE-2.0
-
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -14,29 +11,27 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from utils.compute_overlap import compute_overlap
-from utils.visualization import draw_detections, draw_annotations
+from .anchors import compute_overlap
+from .visualization import draw_detections, draw_annotations
 
+import keras
 import numpy as np
+import os
+import time
+
 import cv2
 import progressbar
-
-assert (callable(progressbar.progressbar)), "Using wrong progressbar module, install 'progressbar2' instead."
+assert(callable(progressbar.progressbar)), "Using wrong progressbar module, install 'progressbar2' instead."
 
 
 def _compute_ap(recall, precision):
-    """
-    Compute the average precision, given the recall and precision curves.
-
+    """ Compute the average precision, given the recall and precision curves.
     Code originally from https://github.com/rbgirshick/py-faster-rcnn.
-
-    Args:
-        recall: The recall curve (list).
+    # Arguments
+        recall:    The recall curve (list).
         precision: The precision curve (list).
-
-    Returns:
+    # Returns
         The average precision as computed in py-faster-rcnn.
-
     """
     # correct AP calculation
     # first append sentinel values at the end
@@ -51,50 +46,42 @@ def _compute_ap(recall, precision):
     # where X axis (recall) changes value
     i = np.where(mrec[1:] != mrec[:-1])[0]
 
-    # and sum (delta recall) * prec
+    # and sum (\Delta recall) * prec
     ap = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])
     return ap
 
 
-def _get_detections(generator, model, score_threshold=0.05, max_detections=100, visualize=False):
-    """
-    Get the detections from the model using the generator.
-
+def _get_detections(generator, model, score_threshold=0.05, max_detections=100, save_path=None):
+    """ Get the detections from the model using the generator.
     The result is a list of lists such that the size is:
-        all_detections[num_images][num_classes] = detections[num_class_detections, 5]
-
-    Args:
-        generator: The generator used to run images through the model.
-        model: The model to run on the images.
-        score_threshold: The score confidence threshold to use.
-        max_detections: The maximum number of detections to use per image.
-        save_path: The path to save the images with visualized detections to.
-
-    Returns:
+        all_detections[num_images][num_classes] = detections[num_detections, 4 + num_classes]
+    # Arguments
+        generator       : The generator used to run images through the model.
+        model           : The model to run on the images.
+        score_threshold : The score confidence threshold to use.
+        max_detections  : The maximum number of detections to use per image.
+        save_path       : The path to save the images with visualized detections to.
+    # Returns
         A list of lists containing the detections for each image in the generator.
-
     """
-    all_detections = [[None for i in range(generator.num_classes()) if generator.has_label(i)] for j in
-                      range(generator.size())]
+    all_detections = [[None for i in range(generator.num_classes()) if generator.has_label(i)] for j in range(generator.size())]
+    all_inferences = [None for i in range(generator.size())]
 
     for i in progressbar.progressbar(range(generator.size()), prefix='Running network: '):
-        image = generator.load_image(i)
-        src_image = image.copy()
-        h, w = image.shape[:2]
+        raw_image    = generator.load_image(i)
+        image        = generator.preprocess_image(raw_image.copy())
+        image, scale = generator.resize_image(image)
 
-        anchors = generator.anchors
-        image, scale, offset_h, offset_w = generator.preprocess_image(image)
+        if keras.backend.image_data_format() == 'channels_first':
+            image = image.transpose((2, 0, 1))
 
         # run network
-        boxes, scores, labels = model.predict_on_batch([np.expand_dims(image, axis=0),
-                                                        np.expand_dims(anchors, axis=0)])
-        boxes[..., [0, 2]] = boxes[..., [0, 2]] - offset_w
-        boxes[..., [1, 3]] = boxes[..., [1, 3]] - offset_h
+        start = time.time()
+        boxes, scores, labels = model.predict_on_batch(np.expand_dims(image, axis=0))[:3]
+        inference_time = time.time() - start
+
+        # correct boxes for image scale
         boxes /= scale
-        boxes[:, :, 0] = np.clip(boxes[:, :, 0], 0, w - 1)
-        boxes[:, :, 1] = np.clip(boxes[:, :, 1], 0, h - 1)
-        boxes[:, :, 2] = np.clip(boxes[:, :, 2], 0, w - 1)
-        boxes[:, :, 3] = np.clip(boxes[:, :, 3], 0, h - 1)
 
         # select indices which have a score above the threshold
         indices = np.where(scores[0, :] > score_threshold)[0]
@@ -106,47 +93,37 @@ def _get_detections(generator, model, score_threshold=0.05, max_detections=100, 
         scores_sort = np.argsort(-scores)[:max_detections]
 
         # select detections
-        # (n, 4)
-        image_boxes = boxes[0, indices[scores_sort], :]
-        # (n, )
-        image_scores = scores[scores_sort]
-        # (n, )
-        image_labels = labels[0, indices[scores_sort]]
-        # (n, 6)
-        detections = np.concatenate(
-            [image_boxes, np.expand_dims(image_scores, axis=1), np.expand_dims(image_labels, axis=1)], axis=1)
+        image_boxes      = boxes[0, indices[scores_sort], :]
+        image_scores     = scores[scores_sort]
+        image_labels     = labels[0, indices[scores_sort]]
+        image_detections = np.concatenate([image_boxes, np.expand_dims(image_scores, axis=1), np.expand_dims(image_labels, axis=1)], axis=1)
 
-        if visualize:
-            draw_annotations(src_image, generator.load_annotations(i), label_to_name=generator.label_to_name)
-            draw_detections(src_image, detections[:5, :4], detections[:5, 4], detections[:5, 5].astype(np.int32),
-                            label_to_name=generator.label_to_name,
-                            score_threshold=score_threshold)
+        if save_path is not None:
+            draw_annotations(raw_image, generator.load_annotations(i), label_to_name=generator.label_to_name)
+            draw_detections(raw_image, image_boxes, image_scores, image_labels, label_to_name=generator.label_to_name, score_threshold=score_threshold)
 
-            # cv2.imwrite(os.path.join(save_path, '{}.png'.format(i)), raw_image)
-            cv2.namedWindow('{}'.format(i), cv2.WINDOW_NORMAL)
-            cv2.imshow('{}'.format(i), src_image)
-            cv2.waitKey(0)
+            cv2.imwrite(os.path.join(save_path, '{}.png'.format(i)), raw_image)
 
         # copy detections to all_detections
-        for class_id in range(generator.num_classes()):
-            all_detections[i][class_id] = detections[detections[:, -1] == class_id, :-1]
+        for label in range(generator.num_classes()):
+            if not generator.has_label(label):
+                continue
 
-    return all_detections
+            all_detections[i][label] = image_detections[image_detections[:, -1] == label, :-1]
+
+        all_inferences[i] = inference_time
+
+    return all_detections, all_inferences
 
 
 def _get_annotations(generator):
-    """
-    Get the ground truth annotations from the generator.
-
+    """ Get the ground truth annotations from the generator.
     The result is a list of lists such that the size is:
-        all_annotations[num_images][num_classes] = annotations[num_class_annotations, 5]
-
-    Args:
-        generator: The generator used to retrieve ground truth annotations.
-
-    Returns:
+        all_detections[num_images][num_classes] = annotations[num_detections, 5]
+    # Arguments
+        generator : The generator used to retrieve ground truth annotations.
+    # Returns
         A list of lists containing the annotations for each image in the generator.
-
     """
     all_annotations = [[None for i in range(generator.num_classes())] for j in range(generator.size())]
 
@@ -175,7 +152,6 @@ def evaluate(
 ):
     """
     Evaluate a given dataset using a given model.
-
     Args:
         generator: The generator that represents the dataset to evaluate.
         model: The model to evaluate.
@@ -183,10 +159,8 @@ def evaluate(
         score_threshold: The score confidence threshold to use for detections.
         max_detections: The maximum number of detections to use per image.
         visualize: Show the visualized detections or not.
-
     Returns:
         A dict mapping class names to mAP scores.
-
     """
     # gather all detections and annotations
     all_detections = _get_detections(generator, model, score_threshold=score_threshold, max_detections=max_detections,
@@ -267,43 +241,3 @@ def evaluate(
     print('num_fp={}, num_tp={}, num_annotations={}'.format(num_fp, num_tp,num_annotations))
 
     return average_precisions
-
-
-if __name__ == '__main__':
-    from generators.pascal import PascalVocGenerator
-    from model import efficientdet
-    import os
-
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-
-    phi = 1
-    weighted_bifpn = False
-    common_args = {
-        'batch_size': 1,
-        'phi': phi,
-    }
-    test_generator = PascalVocGenerator(
-        'datasets/VOC2007',
-        'test',
-        shuffle_groups=False,
-        skip_truncated=False,
-        skip_difficult=True,
-        **common_args
-    )
-    model_path = 'checkpoints/2019-12-03/pascal_05_0.6283_1.1975_0.8029.h5'
-    input_shape = (test_generator.image_size, test_generator.image_size)
-    anchors = test_generator.anchors
-    num_classes = test_generator.num_classes()
-    model, prediction_model = efficientdet(phi=phi, num_classes=num_classes, weighted_bifpn=weighted_bifpn)
-    prediction_model.load_weights(model_path, by_name=True)
-    average_precisions = evaluate(test_generator, prediction_model, visualize=False)
-    # compute per class average precision
-    total_instances = []
-    precisions = []
-    for label, (average_precision, num_annotations) in average_precisions.items():
-        print('{:.0f} instances of class'.format(num_annotations), test_generator.label_to_name(label),
-              'with average precision: {:.4f}'.format(average_precision))
-        total_instances.append(num_annotations)
-        precisions.append(average_precision)
-    mean_ap = sum(precisions) / sum(x > 0 for x in total_instances)
-    print('mAP: {:.4f}'.format(mean_ap))

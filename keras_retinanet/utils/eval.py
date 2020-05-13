@@ -263,7 +263,8 @@ def evaluate(
         # compute average precision
         average_precision = _compute_ap(recall, precision)
         average_precisions[label] = average_precision, num_annotations
-    print('num_fp={}, num_tp={}'.format(num_fp, num_tp))
+    
+    print('num_fp={}, num_tp={}, num_annotations={}'.format(num_fp, num_tp,num_annotations))
 
     return average_precisions
 
